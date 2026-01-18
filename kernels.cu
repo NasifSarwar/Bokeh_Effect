@@ -1,72 +1,135 @@
 #include <cuda_runtime.h>
 
-__global__ void blur5x5_naive(
+#define TILE_W (16 + 2*RADIUS)
+#define TILE_H (16 + 2*RADIUS)
+#define RADIUS 15
+#define KSIZE (2*RADIUS + 1)
+
+__global__ void blur_naive_31(
     unsigned char* input,
     unsigned char* output,
-    int width, int height, int channels)
+    int w, int h, int c)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= width || y >= height) return;
+    if (x >= w || y >= h) return;
 
-    int half = 15;  // 5x5 kernel radius
+    float r = 0, g = 0, b = 0;
     int count = 0;
 
-    float r = 0.0f, g = 0.0f, b = 0.0f;
-
-    for (int dy = -half; dy <= half; dy++) {
-        for (int dx = -half; dx <= half; dx++) {
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
 
             int nx = x + dx;
             int ny = y + dy;
 
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                int idx = (ny * width + nx) * channels;
-
-                r += input[idx + 0];
+            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                int idx = (ny * w + nx) * c;
+                r += input[idx];
                 g += input[idx + 1];
                 b += input[idx + 2];
-
                 count++;
             }
         }
     }
 
-    int outIdx = (y * width + x) * channels;
+    int out = (y * w + x) * c;
+    output[out]     = (unsigned char)(r / count);
+    output[out + 1] = (unsigned char)(g / count);
+    output[out + 2] = (unsigned char)(b / count);
+}
 
-    output[outIdx + 0] = (unsigned char)(r / count);
-    output[outIdx + 1] = (unsigned char)(g / count);
-    output[outIdx + 2] = (unsigned char)(b / count);
+
+__global__ void blur_shared_31(
+    unsigned char* input,
+    unsigned char* output,
+    int w, int h, int c)
+{
+
+
+    __shared__ unsigned char tile[TILE_W * TILE_H * 3];
+
+    int bx = blockIdx.x * 16;
+    int by = blockIdx.y * 16;
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    for (int yy = ty; yy < TILE_H; yy += blockDim.y) {
+        for (int xx = tx; xx < TILE_W; xx += blockDim.x) {
+
+            int gx = bx + xx - RADIUS;
+            int gy = by + yy - RADIUS;
+
+            if (gx < 0) gx = 0;
+            if (gy < 0) gy = 0;
+            if (gx >= w) gx = w - 1;
+            if (gy >= h) gy = h - 1;
+
+            int in_idx = (gy * w + gx) * 3;
+            int t_idx  = (yy * TILE_W + xx) * 3;
+
+            tile[t_idx]     = input[in_idx];
+            tile[t_idx + 1] = input[in_idx + 1];
+            tile[t_idx + 2] = input[in_idx + 2];
+        }
+    }
+
+    __syncthreads();
+
+    int x = bx + tx;
+    int y = by + ty;
+
+    if (x >= w || y >= h) return;
+
+    float r = 0, g = 0, b = 0;
+
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+
+            int nx = tx + dx + RADIUS;
+            int ny = ty + dy + RADIUS;
+
+            int t_idx = (ny * TILE_W + nx) * 3;
+
+            r += tile[t_idx];
+            g += tile[t_idx + 1];
+            b += tile[t_idx + 2];
+        }
+    }
+
+    int out_idx = (y * w + x) * 3;
+    output[out_idx]     = (unsigned char)(r / (KSIZE * KSIZE));  // R
+    output[out_idx + 1] = (unsigned char)(g / (KSIZE * KSIZE));  // G
+    output[out_idx + 2] = (unsigned char)(b / (KSIZE * KSIZE));  // B
+
 }
 
 
 __global__ void merge_mask(
-    unsigned char* original,
-    unsigned char* blurred,
+    unsigned char* orig,
+    unsigned char* blur,
     unsigned char* mask,
-    unsigned char* output,
-    int width, int height, int channels,
+    unsigned char* out,
+    int w, int h, int c,
     unsigned char threshold)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= width || y >= height) return;
+    if (x >= w || y >= h) return;
 
-    int idx_rgb = (y * width + x) * channels;
-    int idx_mask = y * width + x;
+    int id = (y * w + x) * c;
+    int mid = (y * w + x);
 
-    if (mask[idx_mask] > threshold) {
-        // Foreground: keep original sharp
-        output[idx_rgb + 0] = original[idx_rgb + 0];
-        output[idx_rgb + 1] = original[idx_rgb + 1];
-        output[idx_rgb + 2] = original[idx_rgb + 2];
+    if (mask[mid] > threshold) {
+        out[id]     = orig[id];
+        out[id + 1] = orig[id + 1];
+        out[id + 2] = orig[id + 2];
     } else {
-        // Background: use blurred pixel
-        output[idx_rgb + 0] = blurred[idx_rgb + 0];
-        output[idx_rgb + 1] = blurred[idx_rgb + 1];
-        output[idx_rgb + 2] = blurred[idx_rgb + 2];
+        out[id]     = blur[id];
+        out[id + 1] = blur[id + 1];
+        out[id + 2] = blur[id + 2];
     }
 }
-

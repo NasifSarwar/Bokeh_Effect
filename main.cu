@@ -2,101 +2,99 @@
 #include <cuda_runtime.h>
 #include "utils.h"
 
-__global__ void blur5x5_naive(unsigned char*, unsigned char*, int, int, int);
+__global__ void blur_naive_31(unsigned char*, unsigned char*, int, int, int);
+__global__ void blur_shared_31(unsigned char*, unsigned char*, int, int, int);
 __global__ void merge_mask(unsigned char*, unsigned char*, unsigned char*, unsigned char*, int, int, int, unsigned char);
 
 int main() {
-    int w, h, c;
-    int wm, hm, cm;
+    bool useOptimized = true;   // switch naive/optimized
 
-    // We will process frames 00000 → 00004 (test set)
-    for (int frame_id = 0; frame_id < 90; frame_id++) {
+    float total_ms = 0.0f;
+    int frame_count = 0;
 
-        char frame_path[64];
-        char mask_path[64];
-        char out_path[64];
+    for (int frame = 0; frame < 90; frame++) {
+        char fpath[64], mpath[64], outpath[64];
+        snprintf(fpath, 64, "frames/%05d.jpg", frame);
+        snprintf(mpath, 64, "masks/%05d.png", frame);
+        snprintf(outpath, 64, "output_frames/%05d.png", frame);
 
-        snprintf(frame_path, sizeof(frame_path), "frames/%05d.jpg", frame_id);
-        snprintf(mask_path, sizeof(mask_path),   "masks/%05d.png", frame_id);
-        snprintf(out_path, sizeof(out_path),     "output_frames/%05d.png", frame_id);
+        int w, h, c;
+        int wm, hm, cm;
 
-        std::cout << "Processing frame " << frame_id << "...\n";
+        unsigned char* h_in  = load_image(fpath, w, h, c, false);
+        unsigned char* h_mask = load_image(mpath, wm, hm, cm, true);
 
-        // Load image and mask
-        unsigned char* h_input = load_image(frame_path, w, h, c, false);
-        unsigned char* h_mask  = load_image(mask_path,  wm, hm, cm, true);
-
-        if (!h_input || !h_mask) {
-            std::cout << "Skipping missing frame " << frame_id << "\n";
-            continue;
-        }
-
-        if (w != wm || h != hm) {
-            std::cout << "Error: size mismatch in frame " << frame_id << "\n";
-            continue;
-        }
+        if (!h_in || !h_mask) continue;
+        if (w != wm || h != hm) continue;
 
         size_t img_size  = w * h * c;
         size_t mask_size = w * h;
 
-        // Allocate host buffers
-        unsigned char* h_blurred = (unsigned char*)malloc(img_size);
-        unsigned char* h_output  = (unsigned char*)malloc(img_size);
+        unsigned char* h_blur  = (unsigned char*)malloc(img_size);
+        unsigned char* h_out   = (unsigned char*)malloc(img_size);
 
-        // Allocate device memory
-        unsigned char *d_input, *d_blurred, *d_mask, *d_output;
-        cudaMalloc(&d_input,   img_size);
-        cudaMalloc(&d_blurred, img_size);
-        cudaMalloc(&d_output,  img_size);
-        cudaMalloc(&d_mask,    mask_size);
+        unsigned char *d_in, *d_blur, *d_mask, *d_out;
+        cudaMalloc(&d_in,   img_size);
+        cudaMalloc(&d_blur, img_size);
+        cudaMalloc(&d_mask, mask_size);
+        cudaMalloc(&d_out,  img_size);
 
-        // Copy data to GPU
-        cudaMemcpy(d_input, h_input, img_size, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_mask,  h_mask,  mask_size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_in,   h_in,   img_size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_mask, h_mask, mask_size, cudaMemcpyHostToDevice);
 
-        // Kernel launch config
-        dim3 block(16, 16);
-        dim3 grid((w + block.x - 1) / block.x,
-                  (h + block.y - 1) / block.y);
+        dim3 block(16,16);
+        dim3 grid((w + 15)/16, (h + 15)/16);
 
-        // Blur kernel
-        blur5x5_naive<<<grid, block>>>(d_input, d_blurred, w, h, c);
+
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        // Start timing
+        cudaEventRecord(start);
+
+        if (useOptimized)
+            blur_shared_31<<<grid, block>>>(d_in, d_blur, w, h, c);
+        else
+            blur_naive_31<<<grid, block>>>(d_in, d_blur, w, h, c);
+
         cudaDeviceSynchronize();
 
-        // Merge kernel
-        unsigned char threshold = 50;  // adjust if needed
-        merge_mask<<<grid, block>>>(d_input, d_blurred, d_mask, d_output, w, h, c, threshold);
+        merge_mask<<<grid, block>>>(d_in, d_blur, d_mask, d_out, w, h, c, 50);
+
         cudaDeviceSynchronize();
 
-        // Copy result back
-        cudaMemcpy(h_output, d_output, img_size, cudaMemcpyDeviceToHost);
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
 
-        // Save to file
-        save_image(out_path, h_output, w, h, c);
-        std::cout << "Saved " << out_path << "\n";
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start, stop);
+        printf("Frame %d GPU time: %.2f ms\n", frame+1, ms);
+        total_ms += ms;
+        frame_count++;
 
-        // Cleanup for this frame
-        cudaFree(d_input);
-        cudaFree(d_blurred);
-        cudaFree(d_output);
+        cudaMemcpy(h_out, d_out, img_size, cudaMemcpyDeviceToHost);
+
+        save_image(outpath, h_out, w, h, c);
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        cudaFree(d_in);
+        cudaFree(d_blur);
         cudaFree(d_mask);
-
-        free(h_input);
+        cudaFree(d_out);
+        free(h_in);
         free(h_mask);
-        free(h_blurred);
-        free(h_output);
+        free(h_blur);
+        free(h_out);
     }
 
-        std::cout << "Stitching frames into video...\n";
+    float avg_ms = total_ms / frame_count;
+    printf("Average GPU time per frame: %.2f ms\n", avg_ms);
 
-    int ret = system("~/Project/ffmpeg -y -framerate 30 -i output_frames/%05d.png -pix_fmt yuv420p output_video.mp4");
 
-    if (ret == 0) {
-        std::cout << "Video created successfully: output_video.mp4\n";
-    } else {
-        std::cout << "FFmpeg failed to stitch video.\n";
-    }
-
+    system("~/Project/ffmpeg -y -framerate 30 -i output_frames/%05d.png -pix_fmt yuv420p output_video.mp4");
 
     return 0;
 }
