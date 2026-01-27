@@ -1,6 +1,9 @@
 #include <iostream>
 #include <cuda_runtime.h>
 #include "utils.h"
+#include <filesystem>
+namespace fs = std::filesystem;
+
 
 __global__ void blur_naive_31(unsigned char*, unsigned char*, int, int, int);
 __global__ void blur_shared_31(unsigned char*, unsigned char*, int, int, int);
@@ -11,8 +14,13 @@ int main() {
 
     float total_ms = 0.0f;
     int frame_count = 0;
+    int frames = 0;
+    for (const auto& entry : fs::directory_iterator("frames")) {
+        if (entry.path().extension() == ".jpg")
+            frames++;
+    }
 
-    for (int frame = 0; frame < 90; frame++) {
+    for (int frame = 0; frame < frames; frame++) {
         char fpath[64], mpath[64], outpath[64];
         snprintf(fpath, 64, "frames/%05d.jpg", frame);
         snprintf(mpath, 64, "masks/%05d.png", frame);
@@ -93,8 +101,9 @@ int main() {
     float avg_ms = total_ms / frame_count;
     printf("Average GPU time per frame: %.2f ms\n", avg_ms);
 
+    system("~/Project/ffmpeg -y -framerate 30 -i frames/%05d.jpg -pix_fmt yuv420p original_video.mp4");
 
-    system("~/Project/ffmpeg -y -framerate 30 -i output_frames/%05d.png -pix_fmt yuv420p output_video.mp4");
+    system("~/Project/ffmpeg -y -framerate 30 -i output_frames/%05d.png -pix_fmt yuv420p blurred_video.mp4");
 
     return 0;
 }
