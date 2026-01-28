@@ -1,9 +1,10 @@
 #include <cuda_runtime.h>
-
 #define TILE_W (16 + 2*RADIUS)
 #define TILE_H (16 + 2*RADIUS)
 #define RADIUS 15
 #define KSIZE (2*RADIUS + 1)
+#define SEP_TILE_W 128
+#define SEP_TILE_H 16
 
 __global__ void blur_naive_31(
     unsigned char* input,
@@ -132,4 +133,105 @@ __global__ void merge_mask(
         out[id + 1] = blur[id + 1];
         out[id + 2] = blur[id + 2];
     }
+}
+
+
+// ============ Separable Blur with Shared Memory ============
+
+// Horizontal pass
+__global__ void blur_separable_h(
+    unsigned char* input,
+    float* temp,
+    int w, int h, int c)
+{
+    __shared__ unsigned char tile[(SEP_TILE_W + 2 * RADIUS) * 3];
+
+    int x = blockIdx.x * SEP_TILE_W + threadIdx.x;
+    int y = blockIdx.y;
+
+    if (y >= h) return;
+
+    int tile_start = blockIdx.x * SEP_TILE_W - RADIUS;
+
+    // Load tile with halo
+    for (int i = threadIdx.x; i < SEP_TILE_W + 2 * RADIUS; i += blockDim.x) {
+        int gx = tile_start + i;
+
+        if (gx < 0) gx = 0;
+        if (gx >= w) gx = w - 1;
+
+        int in_idx = (y * w + gx) * 3;
+        int t_idx = i * 3;
+
+        tile[t_idx]     = input[in_idx];
+        tile[t_idx + 1] = input[in_idx + 1];
+        tile[t_idx + 2] = input[in_idx + 2];
+    }
+
+    __syncthreads();
+
+    if (x >= w) return;
+
+    float r = 0, g = 0, b = 0;
+
+    for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+        int t_idx = (threadIdx.x + RADIUS + dx) * 3;
+        r += tile[t_idx];
+        g += tile[t_idx + 1];
+        b += tile[t_idx + 2];
+    }
+
+    int out_idx = (y * w + x) * 3;
+    temp[out_idx]     = r / KSIZE;
+    temp[out_idx + 1] = g / KSIZE;
+    temp[out_idx + 2] = b / KSIZE;
+}
+
+// Vertical pass
+__global__ void blur_separable_v(
+    float* temp,
+    unsigned char* output,
+    int w, int h, int c)
+{
+    __shared__ float tile[(SEP_TILE_H + 2 * RADIUS) * 3];
+
+    int x = blockIdx.x;
+    int y = blockIdx.y * SEP_TILE_H + threadIdx.x;
+
+    if (x >= w) return;
+
+    int tile_start = blockIdx.y * SEP_TILE_H - RADIUS;
+
+    // Load tile with halo
+    for (int i = threadIdx.x; i < SEP_TILE_H + 2 * RADIUS; i += blockDim.x) {
+        int gy = tile_start + i;
+
+        if (gy < 0) gy = 0;
+        if (gy >= h) gy = h - 1;
+
+        int in_idx = (gy * w + x) * 3;
+        int t_idx = i * 3;
+
+        tile[t_idx]     = temp[in_idx];
+        tile[t_idx + 1] = temp[in_idx + 1];
+        tile[t_idx + 2] = temp[in_idx + 2];
+    }
+
+    __syncthreads();
+
+    if (y >= h) return;
+
+    float r = 0, g = 0, b = 0;
+
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        int t_idx = (threadIdx.x + RADIUS + dy) * 3;
+        r += tile[t_idx];
+        g += tile[t_idx + 1];
+        b += tile[t_idx + 2];
+    }
+
+    int out_idx = (y * w + x) * 3;
+    output[out_idx]     = (unsigned char)(r / KSIZE);
+    output[out_idx + 1] = (unsigned char)(g / KSIZE);
+    output[out_idx + 2] = (unsigned char)(b / KSIZE);
 }

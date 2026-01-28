@@ -8,9 +8,11 @@ namespace fs = std::filesystem;
 __global__ void blur_naive_31(unsigned char*, unsigned char*, int, int, int);
 __global__ void blur_shared_31(unsigned char*, unsigned char*, int, int, int);
 __global__ void merge_mask(unsigned char*, unsigned char*, unsigned char*, unsigned char*, int, int, int, unsigned char);
+__global__ void blur_separable_h(unsigned char*, float*, int, int, int);
+__global__ void blur_separable_v(float*, unsigned char*, int, int, int);
 
 int main() {
-    bool useOptimized = true;   // switch naive/optimized
+    int mode = 2; // 0 = naive, 1 = shared, 2 = separable
 
     float total_ms = 0.0f;
     int frame_count = 0;
@@ -47,6 +49,11 @@ int main() {
         cudaMalloc(&d_mask, mask_size);
         cudaMalloc(&d_out,  img_size);
 
+        float* d_temp = nullptr;
+        if (mode == 2) {
+            cudaMalloc(&d_temp, w * h * c * sizeof(float));
+        }
+
         cudaMemcpy(d_in,   h_in,   img_size, cudaMemcpyHostToDevice);
         cudaMemcpy(d_mask, h_mask, mask_size, cudaMemcpyHostToDevice);
 
@@ -61,11 +68,19 @@ int main() {
         // Start timing
         cudaEventRecord(start);
 
-        if (useOptimized)
-            blur_shared_31<<<grid, block>>>(d_in, d_blur, w, h, c);
-        else
+        if (mode == 0) {
             blur_naive_31<<<grid, block>>>(d_in, d_blur, w, h, c);
+        } else if (mode == 1) {
+            blur_shared_31<<<grid, block>>>(d_in, d_blur, w, h, c);
+        } else if (mode == 2) {
+            dim3 block_h(128);
+            dim3 grid_h((w + 127) / 128, h);
+            dim3 block_v(16);
+            dim3 grid_v(w, (h + 15) / 16);
 
+            blur_separable_h<<<grid_h, block_h>>>(d_in, d_temp, w, h, c);
+            blur_separable_v<<<grid_v, block_v>>>(d_temp, d_blur, w, h, c);
+        }
         cudaDeviceSynchronize();
 
         merge_mask<<<grid, block>>>(d_in, d_blur, d_mask, d_out, w, h, c, 50);
@@ -92,6 +107,7 @@ int main() {
         cudaFree(d_blur);
         cudaFree(d_mask);
         cudaFree(d_out);
+        if (d_temp) cudaFree(d_temp);
         free(h_in);
         free(h_mask);
         free(h_blur);
