@@ -19,16 +19,16 @@ The project can process a full batch of frames and also measures **per-frame GPU
 
 ## 📂 Project Structure
 
-│── main.cu # Main pipeline: load → blur → merge → save
-│── kernels.cu # Naive + shared-memory optimized blur kernels
-│── utils.cpp # Image loading/writing (stb_image)
-│── utils.h
-│── stb_image.h
-│── stb_image_write.h
-│── frames/ # Input frames (added by user)
-│── masks/ # Binary masks (added by user)
-│── output_frames/ # Output frames written here
-│── final_project # Compiled binary
+├── main.cu                 # Main pipeline: load → blur → merge → save
+├── kernels.cu              # Naive + shared-memory optimized blur kernels
+├── utils.cpp               # Image loading/writing (stb_image)
+├── utils.h
+├── stb_image.h
+├── stb_image_write.h
+├── frames/                 # Input frames (added by user)
+├── masks/                  # Binary masks (added by user)
+├── output_frames/          # Output frames written here
+└── final_project           # Compiled binary
 
 
 ---
